@@ -125,7 +125,35 @@ app.post("/webhook", (req, res) => {
   console.log("Webhook:", req.body.name);
   res.json({ received: true });
 });
+app.post("/generate", async (req, res) => {
+  const { prompt } = req.body;
 
+  if (!prompt) return res.status(400).json({ error: "Prompt requis" });
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+
+    const data = await response.json();
+    const text = data.content?.map(b => b.text || "").join("\n") || "";
+    res.json({ text });
+
+  } catch (err) {
+    console.error("Erreur Claude:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 app.get("/health", (req, res) => {
   res.json({ status: "ok", provider: "FedaPay", country: "Bénin", timestamp: new Date().toISOString() });
 });
