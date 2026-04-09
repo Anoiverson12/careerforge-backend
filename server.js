@@ -102,10 +102,21 @@ app.post("/create-checkout-session", async (req, res) => {
       null
     );
 
-    const paymentUrl = tokenData.url || tokenData.token?.url;
+    const paymentUrl = tokenData.url 
+  || tokenData.token?.url
+  || tokenData.token
+  || tokenData.payment_url;
 
-    res.json({ url: paymentUrl, transactionId });
+console.log("FedaPay tokenData:", JSON.stringify(tokenData));
 
+if (!paymentUrl) {
+  return res.status(500).json({ 
+    error: "URL de paiement introuvable",
+    debug: tokenData 
+  });
+}
+
+res.json({ url: paymentUrl, transactionId });
   } catch (err) {
     console.error("FedaPay checkout error:", err);
     res.status(500).json({ error: err.message });
