@@ -1,9 +1,8 @@
- const express = require("express");
+const express = require("express");
 const cors = require("cors");
 const https = require("https");
 
 const app = express();
-
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
@@ -41,6 +40,17 @@ function fedapayRequest(method, path, body) {
   });
 }
 
+function extractTransaction(data) {
+  // FedaPay retourne la clé "v1/transaction"
+  const keys = Object.keys(data);
+  for (const key of keys) {
+    if (key.includes("transaction")) {
+      return data[key];
+    }
+  }
+  return null;
+}
+
 app.post("/create-checkout-session", async (req, res) => {
   const { plan, email, phone, firstname, lastname } = req.body;
 
@@ -48,7 +58,6 @@ app.post("/create-checkout-session", async (req, res) => {
   if (PLANS[plan].amount === 0) return res.json({ free: true });
 
   try {
-    // Étape 1 — Créer la transaction
     const txData = await fedapayRequest("POST", "/transactions", {
       description: `CareerForge AI — Plan ${PLANS[plan].name}`,
       amount: PLANS[plan].amount,
@@ -62,34 +71,19 @@ app.post("/create-checkout-session", async (req, res) => {
       },
     });
 
-    console.log("TX DATA:", JSON.stringify(txData));
+    const tx = extractTransaction(txData);
 
-    const tx = txData?.["v1/transaction"] || txData?.v1?.transaction || txData?.transaction;
-const transactionId = tx?.id;
-const directPaymentUrl = tx?.payment_url;
-
-    if (!transactionId) {
+    if (!tx) {
       return res.status(500).json({ error: "Transaction non créée", debug: txData });
     }
 
-    // Étape 2 — Générer le token
-    const tokenData = await fedapayRequest(
-      "GET", `/transactions/${transactionId}/token`, null
-    );
+    const paymentUrl = tx.payment_url;
 
-    console.log("TOKEN DATA:", JSON.stringify(tokenData));
+    if (!paymentUrl) {
+      return res.status(500).json({ error: "URL introuvable", debug: tx });
+    }
 
-    if (directPaymentUrl) {
-  return res.json({ url: directPaymentUrl, transactionId });
-}
-
-const paymentUrl = tokenData?.url || tokenData?.token?.url;
-
-if (!paymentUrl) {
-  return res.status(500).json({ error: "URL introuvable", debug: tokenData });
-}
-
-res.json({ url: paymentUrl, transactionId });
+    res.json({ url: paymentUrl, transactionId: tx.id });
 
   } catch (err) {
     console.error("Erreur:", err);
@@ -100,18 +94,13 @@ res.json({ url: paymentUrl, transactionId });
 app.get("/transaction/:id", async (req, res) => {
   try {
     const data = await fedapayRequest("GET", `/transactions/${req.params.id}`, null);
-    const tx = data?.v1?.transaction || data?.transaction || data;
+    const tx = extractTransaction(data);
     res.json({ id: tx?.id, status: tx?.status, approved: tx?.status === "approved" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/webhook", (req, res) => {
-  const event = req.body;
-  console.log("Webhook:", event.name);
-  res.json({ received: true });
-});
 app.get("/debug-fedapay", async (req, res) => {
   try {
     const txData = await fedapayRequest("POST", "/transactions", {
@@ -131,6 +120,12 @@ app.get("/debug-fedapay", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+app.post("/webhook", (req, res) => {
+  console.log("Webhook:", req.body.name);
+  res.json({ received: true });
+});
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok", provider: "FedaPay", country: "Bénin", timestamp: new Date().toISOString() });
 });
