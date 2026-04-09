@@ -1,11 +1,11 @@
 // ============================================================
-//  CareerForge AI — Backend Stripe (Node.js + Express)
-//  Compatible : Vercel, Railway, Render, ou serveur classique
+//  CareerForge AI — Backend FedaPay (Node.js + Express)
+//  Adapté pour le Bénin — MTN MoMo & Mobile Money
 // ============================================================
 
 const express = require("express");
 const cors = require("cors");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const https = require("https");
 
 const app = express();
 
@@ -15,183 +15,179 @@ app.use(cors({
   methods: ["GET", "POST"],
 }));
 
-// ─── Body parser (RAW pour les webhooks Stripe) ───────────────
-app.use((req, res, next) => {
-  if (req.originalUrl === "/webhook") {
-    express.raw({ type: "application/json" })(req, res, next);
-  } else {
-    express.json()(req, res, next);
-  }
-});
+app.use(express.json());
 
 // ============================================================
-//  PLANS STRIPE
+//  PLANS
 // ============================================================
 const PLANS = {
-  starter: {
-    name: "Starter",
-    priceId: process.env.STRIPE_PRICE_STARTER,
-    amount: 0,
-  },
-  pro: {
-    name: "Pro",
-    priceId: process.env.STRIPE_PRICE_PRO,
-    amount: 900,
-  },
-  agency: {
-    name: "Agence",
-    priceId: process.env.STRIPE_PRICE_AGENCY,
-    amount: 4900,
-  },
+  starter: { name: "Starter", amount: 0, currency: "XOF" },
+  pro: { name: "Pro", amount: 5900, currency: "XOF" },
+  agency: { name: "Agence", amount: 29000, currency: "XOF" },
 };
 
 // ============================================================
-//  1. CRÉER UNE SESSION DE PAIEMENT
+//  HELPER — Appel API FedaPay
+// ============================================================
+function fedapayRequest(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const options = {
+      hostname: "api.fedapay.com",
+      port: 443,
+      path: `/v1${path}`,
+      method,
+      headers: {
+        "Authorization": `Bearer ${process.env.FEDAPAY_SECRET_KEY}`,
+        "Content-Type": "application/json",
+        ...(data && { "Content-Length": Buffer.byteLength(data) }),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let responseData = "";
+      res.on("data", (chunk) => { responseData += chunk; });
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(responseData));
+        } catch {
+          reject(new Error("Réponse invalide de FedaPay"));
+        }
+      });
+    });
+
+    req.on("error", reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+// ============================================================
+//  1. CRÉER UNE TRANSACTION
 // ============================================================
 app.post("/create-checkout-session", async (req, res) => {
-  const { plan, email } = req.body;
+  const { plan, email, phone, firstname, lastname } = req.body;
 
   if (!PLANS[plan]) {
     return res.status(400).json({ error: "Plan inconnu" });
   }
 
+  if (PLANS[plan].amount === 0) {
+    return res.json({ free: true, message: "Plan gratuit activé" });
+  }
+
   try {
-    const session = await stripe.checkout.sessions.create({
-      mode: "subscription",
-      payment_method_types: ["card"],
-      customer_email: email || undefined,
-      line_items: [{ price: PLANS[plan].priceId, quantity: 1 }],
-      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/pricing`,
-      metadata: { plan },
+    const transaction = await fedapayRequest("POST", "/transactions", {
+      description: `CareerForge AI — Plan ${PLANS[plan].name}`,
+      amount: PLANS[plan].amount,
+      currency: { iso: PLANS[plan].currency },
+      callback_url: `${process.env.FRONTEND_URL}/success`,
+      customer: {
+        email: email || "client@careerforge.com",
+        phone_number: {
+          number: phone || "",
+          country: "BJ",
+        },
+        firstname: firstname || "Client",
+        lastname: lastname || "CareerForge",
+      },
     });
 
-    res.json({ url: session.url, sessionId: session.id });
+    const transactionId = transaction.v1?.transaction?.id
+      || transaction.transaction?.id;
+
+    const tokenData = await fedapayRequest(
+      "GET",
+      `/transactions/${transactionId}/token`,
+      null
+    );
+
+    const paymentUrl = tokenData.url || tokenData.token?.url;
+
+    res.json({ url: paymentUrl, transactionId });
+
   } catch (err) {
-    console.error("Stripe checkout error:", err);
+    console.error("FedaPay checkout error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ============================================================
-//  2. PORTAIL CLIENT
+//  2. VÉRIFIER UNE TRANSACTION
 // ============================================================
-app.post("/create-portal-session", async (req, res) => {
-  const { customerId } = req.body;
-
-  if (!customerId) {
-    return res.status(400).json({ error: "customerId requis" });
-  }
+app.get("/transaction/:id", async (req, res) => {
+  const { id } = req.params;
 
   try {
-    const session = await stripe.billingPortal.sessions.create({
-      customer: customerId,
-      return_url: `${process.env.FRONTEND_URL}/dashboard`,
-    });
+    const data = await fedapayRequest("GET", `/transactions/${id}`, null);
+    const transaction = data.v1?.transaction || data.transaction;
 
-    res.json({ url: session.url });
-  } catch (err) {
-    console.error("Portal error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ============================================================
-//  3. VÉRIFIER L'ABONNEMENT
-// ============================================================
-app.get("/subscription/:customerId", async (req, res) => {
-  const { customerId } = req.params;
-
-  try {
-    const subscriptions = await stripe.subscriptions.list({
-      customer: customerId,
-      status: "active",
-      limit: 1,
-    });
-
-    if (subscriptions.data.length === 0) {
-      return res.json({ active: false, plan: "starter" });
+    if (!transaction) {
+      return res.status(404).json({ error: "Transaction introuvable" });
     }
 
-    const sub = subscriptions.data[0];
-    const priceId = sub.items.data[0].price.id;
-    const planName = Object.keys(PLANS).find(
-      (key) => PLANS[key].priceId === priceId
-    ) || "unknown";
-
     res.json({
-      active: true,
-      plan: planName,
-      subscriptionId: sub.id,
-      currentPeriodEnd: new Date(sub.current_period_end * 1000).toISOString(),
+      id: transaction.id,
+      status: transaction.status,
+      amount: transaction.amount,
+      approved: transaction.status === "approved",
     });
+
   } catch (err) {
-    console.error("Subscription check error:", err);
+    console.error("Transaction check error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ============================================================
-//  4. WEBHOOK STRIPE
+//  3. WEBHOOK FEDAPAY
 // ============================================================
 app.post("/webhook", async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-  let event;
+  const event = req.body;
 
-  try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err) {
-    console.error("Webhook signature error:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
+  console.log("📩 Événement FedaPay reçu:", event.name);
 
-  switch (event.type) {
-    case "checkout.session.completed": {
-      const session = event.data.object;
-      console.log("✅ Nouveau paiement:", {
-        customer: session.customer,
-        email: session.customer_email,
-        plan: session.metadata.plan,
+  switch (event.name) {
+    case "transaction.approved": {
+      const transaction = event.entity;
+      console.log("✅ Paiement approuvé:", {
+        id: transaction.id,
+        amount: transaction.amount,
+        customer: transaction.customer?.email,
       });
       break;
     }
-    case "customer.subscription.updated": {
-      const sub = event.data.object;
-      console.log("🔄 Abonnement mis à jour:", sub.id, sub.status);
+    case "transaction.declined": {
+      console.log("❌ Paiement refusé:", event.entity?.id);
       break;
     }
-    case "customer.subscription.deleted": {
-      const sub = event.data.object;
-      console.log("❌ Abonnement annulé:", sub.id);
-      break;
-    }
-    case "invoice.payment_failed": {
-      const invoice = event.data.object;
-      console.log("💳 Paiement échoué pour:", invoice.customer_email);
+    case "transaction.canceled": {
+      console.log("🚫 Paiement annulé:", event.entity?.id);
       break;
     }
     default:
-      console.log(`Événement non géré: ${event.type}`);
+      console.log(`Événement non géré: ${event.name}`);
   }
 
   res.json({ received: true });
 });
 
 // ============================================================
-//  5. HEALTH CHECK
+//  4. HEALTH CHECK
 // ============================================================
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    provider: "FedaPay",
+    country: "Bénin",
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ─── DÉMARRAGE ────────────────────────────────────────────────
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`🚀 CareerForge backend démarré sur le port ${PORT}`);
+  console.log(`🚀 CareerForge backend FedaPay démarré sur le port ${PORT}`);
 });
 
 module.exports = app;
