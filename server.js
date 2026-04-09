@@ -64,9 +64,9 @@ app.post("/create-checkout-session", async (req, res) => {
 
     console.log("TX DATA:", JSON.stringify(txData));
 
-    const transactionId = txData?.v1?.transaction?.id
-      || txData?.transaction?.id
-      || txData?.id;
+    const tx = txData?.["v1/transaction"] || txData?.v1?.transaction || txData?.transaction;
+const transactionId = tx?.id;
+const directPaymentUrl = tx?.payment_url;
 
     if (!transactionId) {
       return res.status(500).json({ error: "Transaction non créée", debug: txData });
@@ -79,16 +79,17 @@ app.post("/create-checkout-session", async (req, res) => {
 
     console.log("TOKEN DATA:", JSON.stringify(tokenData));
 
-    const paymentUrl = tokenData?.url
-      || tokenData?.token?.url
-      || tokenData?.v1?.token?.url
-      || `https://sandbox-checkout.fedapay.com/pay/${tokenData?.token?.token}`;
+    if (directPaymentUrl) {
+  return res.json({ url: directPaymentUrl, transactionId });
+}
 
-    if (!paymentUrl) {
-      return res.status(500).json({ error: "URL introuvable", debug: tokenData });
-    }
+const paymentUrl = tokenData?.url || tokenData?.token?.url;
 
-    res.json({ url: paymentUrl, transactionId });
+if (!paymentUrl) {
+  return res.status(500).json({ error: "URL introuvable", debug: tokenData });
+}
+
+res.json({ url: paymentUrl, transactionId });
 
   } catch (err) {
     console.error("Erreur:", err);
