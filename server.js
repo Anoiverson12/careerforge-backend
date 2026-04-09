@@ -1,4 +1,4 @@
-        const express = require("express");
+ const express = require("express");
 const cors = require("cors");
 const https = require("https");
 
@@ -111,7 +111,25 @@ app.post("/webhook", (req, res) => {
   console.log("Webhook:", event.name);
   res.json({ received: true });
 });
-
+app.get("/debug-fedapay", async (req, res) => {
+  try {
+    const txData = await fedapayRequest("POST", "/transactions", {
+      description: "Test CareerForge",
+      amount: 100,
+      currency: { iso: "XOF" },
+      callback_url: "https://careerforge-frontend.vercel.app/success",
+      customer: {
+        email: "test@test.com",
+        phone_number: { number: "97000000", country: "BJ" },
+        firstname: "Test",
+        lastname: "User",
+      },
+    });
+    res.json({ txData });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.get("/health", (req, res) => {
   res.json({ status: "ok", provider: "FedaPay", country: "Bénin", timestamp: new Date().toISOString() });
 });
